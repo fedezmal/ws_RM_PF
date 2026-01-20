@@ -7,93 +7,83 @@ import json
 import os
 import sys
 from vosk import Model, KaldiRecognizer
-from contextlib import contextmanager
-from ctypes import *
-
-# --- BLOQUE PARA SILENCIAR ERRORES DE ALSA (Del Programa 1) ---
-# Esto evita que la terminal se llene de basura de logs de audio
-ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
-def py_error_handler(filename, line, function, err, fmt):
-    pass
-c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
-
-@contextmanager
-def noalsaerr():
-    try:
-        asound = cdll.LoadLibrary('libasound.so')
-        asound.snd_lib_error_set_handler(c_error_handler)
-        yield
-        asound.snd_lib_error_set_handler(None)
-    except:
-        yield
-# --------------------------------------------------------------
 
 class NodoEscuchaKobuki(Node):
     def __init__(self):
         super().__init__('nodo_escucha_kobuki')
         
-        # Configuración
-        self.mic_index = 3  # Tu índice de micrófono confirmado
-        self.trigger_word = "lazaro" # Palabra de activación (minúsculas)
+        # --- CONFIGURACIÓN ---
+        # Si tienes problemas, cambia None por el número de índice (ej. 8)
+        self.mic_index = None 
+        self.trigger_word = "lazaro"
+        # ---------------------
 
         # 1. Publicador para el sonido del Kobuki
         self.publisher_sound = self.create_publisher(Sound, '/commands/sound', 10)
         
         # 2. Cargar Modelo Vosk
-        self.get_logger().info("Cargando modelo de voz (esto tarda un poco)...")
+        self.get_logger().info("Cargando modelo de voz...")
         try:
-            # Asegúrate de que la carpeta 'model' está donde ejecutas el comando
-            if not os.path.exists("/home/diego/Documents/ROBOTICA_3/MOVILES/Proyecto/model"):
-                self.get_logger().error("¡ERROR! No encuentro la carpeta 'model'.")
-                raise FileNotFoundError("Carpeta model no encontrada")
-            self.model = Model("/home/diego/Documents/ROBOTICA_3/MOVILES/Proyecto/model")
+            # Obtenemos la ruta del directorio donde está ESTE script ejecutándose
+            directorio_actual = os.path.dirname(os.path.abspath(__file__))
+            
+            # Construimos la ruta al modelo asumiendo que está en la misma carpeta
+            ruta_modelo = os.path.join(directorio_actual, "model")
+            
+            self.get_logger().info(f"Buscando modelo en: {ruta_modelo}")
+
+            if not os.path.exists(ruta_modelo):
+                raise FileNotFoundError(f"Carpeta 'model' no encontrada en {ruta_modelo}")
+            
+            self.model = Model(ruta_modelo)
         except Exception as e:
-            self.get_logger().error(f"Error cargando modelo: {e}")
+            self.get_logger().error(f"Error crítico cargando modelo: {e}")
             sys.exit(1)
 
-        self.get_logger().info("Modelo cargado. Iniciando hilo de escucha...")
+        self.get_logger().info("Modelo cargado correctamente.")
 
-        # 3. Iniciar el hilo de escucha (para no bloquear ROS)
+        # 3. Iniciar el hilo de escucha
         self.stop_threads = False
         self.thread = threading.Thread(target=self.loop_escucha)
-        self.thread.daemon = True # El hilo muere si el programa principal muere
+        self.thread.daemon = True
         self.thread.start()
 
     def loop_escucha(self):
-        """Este bucle corre en paralelo y maneja el micrófono"""
+        """Bucle principal de escucha (se ejecuta en paralelo)"""
+        # Inicializamos el reconocedor
         rec = KaldiRecognizer(self.model, 16000)
         p = pyaudio.PyAudio()
         
         try:
-            with noalsaerr():
-                stream = p.open(format=pyaudio.paInt16, 
-                                channels=2, 
-                                rate=16000, 
-                                input=True, 
-                                input_device_index=self.mic_index,
-                                frames_per_buffer=4000)
+            # Abrimos el micrófono. 
+            # Nota: No usamos supresores de error para evitar bloqueos.
+            stream = p.open(format=pyaudio.paInt16, 
+                            channels=1, 
+                            rate=16000, 
+                            input=True, 
+                            input_device_index=self.mic_index,
+                            frames_per_buffer=4000)
             
             stream.start_stream()
-            self.get_logger().info(f"Escuchando... Di '{self.trigger_word}'")
+            self.get_logger().info(f"Escuchando... Di '{self.trigger_word}' para activar.")
 
             while not self.stop_threads:
-                # Leemos datos del micro
+                # Leemos el buffer de audio
                 data = stream.read(4000, exception_on_overflow=False)
                 
+                # Vosk procesa el audio
                 if rec.AcceptWaveform(data):
-                    # Se ha completado una frase
                     result = json.loads(rec.Result())
                     texto = result['text']
                     
                     if texto:
-                        self.get_logger().info(f"Texto detectado: '{texto}'")
+                        # Solo imprimimos si detectó texto real (evita spam de vacíos)
+                        self.get_logger().info(f"He entendido: '{texto}'")
                         self.procesar_orden(texto)
-                else:
-                    # (Opcional) Resultados parciales mientras hablas
-                    pass
 
         except Exception as e:
-            self.get_logger().error(f"Error en el hilo de audio: {e}")
+            self.get_logger().error(f"Error en el sistema de audio: {e}")
+            self.get_logger().warn("Verifica que el micrófono está conectado y seleccionado en Configuración > Sonido")
         finally:
             if 'stream' in locals():
                 stream.stop_stream()
@@ -101,33 +91,32 @@ class NodoEscuchaKobuki(Node):
             p.terminate()
 
     def procesar_orden(self, texto):
-        """Lógica para reaccionar a lo que se escucha"""
+        """Lógica de comandos"""
         texto = texto.lower()
 
-        # Chequeamos si la palabra clave "lazaro" (o con tilde) está en la frase
         if self.trigger_word in texto or "lázaro" in texto:
             self.activar_robot()
+        
         elif "adios" in texto or "adiós" in texto:
-            self.get_logger().info("Comando: Adiós")
-            os.system('espeak -v es "Hasta luego compañero"')
-        else:
-            # Opcional: imprimir qué entendió si no fue un comando
-            pass
+            self.get_logger().info("Comando recibido: Adiós")
+            # El '&' es vital para que el robot siga escuchando mientras habla
+            os.system('espeak -v es "Hasta luego compañero" &') 
 
     def activar_robot(self):
-        self.get_logger().info('¡PALABRA MÁGICA DETECTADA! -> Interactuando')
+        self.get_logger().info('¡ACTIVADO! Esperando órdenes...')
         
-        # 1. Feedback visual en terminal
-        print("\n--- LAZARO ACTIVADO ---\n")
+        # 1. Feedback visual
+        print("\n-------------------------")
+        print("   ESTOY ESCUCHANDO      ")
+        print("-------------------------\n")
 
-        # 2. El Robot Pita (Publicar en ROS)
+        # 2. Sonido del Kobuki (Beep)
         sonido_msg = Sound()
-        sonido_msg.value = 6  # Sonido POWER ON
+        sonido_msg.value = 6 
         self.publisher_sound.publish(sonido_msg)
 
-        # 3. El PC Habla (Feedback auditivo)
-        # El '&' al final hace que espeak no bloquee el hilo brevemente
-        os.system('espeak -v es "Hola, estoy listo" &') 
+        # 3. Feedback de voz del PC
+        os.system('espeak -v es "Dime, te escucho" &') 
 
     def cleanup(self):
         self.stop_threads = True
@@ -138,10 +127,9 @@ def main(args=None):
     nodo = NodoEscuchaKobuki()
     
     try:
-        # ROS gira aquí gestionando cualquier otra cosa necesaria
         rclpy.spin(nodo)
     except KeyboardInterrupt:
-        nodo.get_logger().info("Deteniendo nodo...")
+        pass
     finally:
         nodo.cleanup()
         nodo.destroy_node()
