@@ -1,15 +1,13 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient  # <--- NUEVO
 from kobuki_ros_interfaces.msg import Sound
-from nav2_msgs.action import NavigateToPose  # <--- NUEVO: La acción de Nav2
-from geometry_msgs.msg import PoseStamped    # <--- NUEVO: Para las coordenadas
-
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 import threading
 import pyaudio
 import json
 import os
 import sys
+import math
 from vosk import Model, KaldiRecognizer
 
 class NodoEscuchaKobuki(Node):
@@ -20,27 +18,33 @@ class NodoEscuchaKobuki(Node):
         self.mic_index = None 
         self.trigger_word = "lazaro"
         
-        # DICCIONARIO DE LUGARES [x, y]
-        self.diccionario_lugares = {
-            "cocina":  [1.46, -0.549],
-            "puerta":  [0.0, 0.0],  # Origen suele ser 0,0
-            "salón":   [5.0, -2.0],
-            "salon":   [5.0, -2.0],
-            "baño":    [3.0, 3.0]
-        }
+        # Rutas de archivos
+        self.directorio_actual = os.path.dirname(os.path.abspath(__file__))
+        self.archivo_memoria = os.path.join(self.directorio_actual, "lugares.json")
+
+        # Cargar memoria (o usar default si es la primera vez)
+        self.diccionario_lugares = self.cargar_memoria()
+        
+        # Variables de posición
+        self.current_x = None
+        self.current_y = None
         # ---------------------
 
-        # 1. Publicadores
+        # Publicadores y Suscriptores
         self.publisher_sound = self.create_publisher(Sound, '/commands/sound', 10)
+        self.goal_publisher = self.create_publisher(PoseStamped, '/goal_pose', 10)
+        
+        self.amcl_subscription = self.create_subscription(
+            PoseWithCovarianceStamped,
+            '/amcl_pose',
+            self.amcl_callback,
+            10
+        )
 
-        # 2. CLIENTE DE ACCIÓN PARA NAV2 (La integración nueva)
-        self.nav_to_pose_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-
-        # 3. Cargar Modelo Vosk
+        # Cargar Modelo Vosk
         self.get_logger().info("Cargando modelo de voz...")
         try:
-            directorio_actual = os.path.dirname(os.path.abspath(__file__))
-            ruta_modelo = os.path.join(directorio_actual, "model")
+            ruta_modelo = os.path.join(self.directorio_actual, "model")
             if not os.path.exists(ruta_modelo):
                 raise FileNotFoundError(f"No se encuentra modelo en: {ruta_modelo}")
             self.model = Model(ruta_modelo)
@@ -50,26 +54,52 @@ class NodoEscuchaKobuki(Node):
 
         self.get_logger().info("Modelo cargado.")
 
-        # 4. Hilo de escucha
+        # Hilo de escucha
         self.stop_threads = False
         self.thread = threading.Thread(target=self.loop_escucha)
         self.thread.daemon = True
         self.thread.start()
+
+    def amcl_callback(self, msg):
+        self.current_x = msg.pose.pose.position.x
+        self.current_y = msg.pose.pose.position.y
+
+    def cargar_memoria(self):
+        """Carga los puntos desde un archivo JSON para no perderlos al reiniciar"""
+        if os.path.exists(self.archivo_memoria):
+            try:
+                with open(self.archivo_memoria, 'r') as f:
+                    datos = json.load(f)
+                    self.get_logger().info(f"Memoria cargada: {len(datos)} lugares conocidos.")
+                    return datos
+            except Exception as e:
+                self.get_logger().error(f"Error leyendo memoria: {e}")
+        
+        # Default si no hay archivo
+        return {
+            "cocina":  [1.65, 0.0],
+            "puerta":  [3.17, 2.9],
+            "salón":   [5.0, -2.0]
+        }
+
+    def guardar_memoria(self):
+        """Guarda el diccionario actual en el disco duro"""
+        try:
+            with open(self.archivo_memoria, 'w') as f:
+                json.dump(self.diccionario_lugares, f, indent=4)
+            self.get_logger().info("Memoria actualizada y guardada en disco.")
+        except Exception as e:
+            self.get_logger().error(f"No se pudo guardar la memoria: {e}")
 
     def loop_escucha(self):
         rec = KaldiRecognizer(self.model, 16000)
         p = pyaudio.PyAudio()
         
         try:
-            stream = p.open(format=pyaudio.paInt16, 
-                            channels=1, 
-                            rate=16000, 
-                            input=True, 
-                            input_device_index=self.mic_index,
-                            frames_per_buffer=4000)
-            
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, 
+                            input=True, input_device_index=self.mic_index, frames_per_buffer=4000)
             stream.start_stream()
-            self.get_logger().info(f"Escuchando... Di '{self.trigger_word}' o 'llévame a...'")
+            self.get_logger().info(f"Escuchando... Di '{self.trigger_word}'...")
 
             while not self.stop_threads:
                 data = stream.read(4000, exception_on_overflow=False)
@@ -82,16 +112,19 @@ class NodoEscuchaKobuki(Node):
         except Exception as e:
             self.get_logger().error(f"Error audio: {e}")
         finally:
-            if 'stream' in locals():
-                stream.stop_stream()
-                stream.close()
+            if 'stream' in locals(): stream.stop_stream(); stream.close()
             p.terminate()
 
     def procesar_orden(self, texto):
         texto = texto.lower()
+        palabras = texto.split() # Convertimos la frase en lista de palabras
 
-        # COMANDO DE NAVEGACIÓN
-        if "llevame" in texto or "llévame" in texto:
+        # 1. COMANDO "AÑADE" (Nuevo Punto)
+        if "añade" in palabras or "agrega" in palabras:
+            self.registrar_nuevo_punto(palabras)
+
+        # 2. COMANDO "LLÉVAME"
+        elif "llevame" in texto or "llévame" in texto:
             destino_encontrado = None
             for lugar in self.diccionario_lugares:
                 if lugar in texto:
@@ -100,89 +133,94 @@ class NodoEscuchaKobuki(Node):
             
             if destino_encontrado:
                 coords = self.diccionario_lugares[destino_encontrado]
-                # Llamamos a la nueva función integrada con Nav2
                 self.iniciar_navegacion(destino_encontrado, coords)
             else:
                 self.get_logger().warn("Lugar no reconocido.")
                 os.system('espeak -v es "No conozco ese lugar" &')
 
-        # ACTIVACIÓN
+        # 3. UBICACIÓN
+        elif "donde estoy" in texto or "dónde estoy" in texto:
+            self.responder_ubicacion()
+
+        # 4. ACTIVACIÓN
         elif self.trigger_word in texto or "lázaro" in texto:
             self.activar_robot()
         
-        # DESPEDIDA
-        elif "adios" in texto or "adiós" in texto:
+        # 5. DESPEDIDA
+        elif "adios" in texto:
             os.system('espeak -v es "Hasta luego" &') 
 
-    def iniciar_navegacion(self, lugar, coordenadas):
-        """
-        Envía el Goal a Nav2 usando las coordenadas del diccionario.
-        """
-        x, y = coordenadas
-        self.get_logger().info(f"🚀 [Nav2] Iniciando navegación hacia {lugar} ({x}, {y})")
+    def registrar_nuevo_punto(self, palabras):
+        """Lógica para aprender un nuevo lugar"""
+        if self.current_x is None:
+            os.system('espeak -v es "No se donde estoy, no puedo guardar el punto" &')
+            return
 
-        # 1. Feedback auditivo inmediato
+        try:
+            # Buscamos la palabra clave
+            if "añade" in palabras:
+                idx = palabras.index("añade")
+            else:
+                idx = palabras.index("agrega")
+
+            # Cogemos la SIGUIENTE palabra como nombre
+            # Ejemplo: "Añade garaje aqui" -> idx de añade es 0, nombre es palabras[1] ("garaje")
+            if idx + 1 < len(palabras):
+                nombre_nuevo = palabras[idx + 1]
+                
+                # Evitamos guardar palabras basura como "el", "la", "un"
+                if nombre_nuevo in ["el", "la", "un", "punto", "aquí"]:
+                     os.system('espeak -v es "Dame un nombre más específico" &')
+                     return
+
+                # Guardamos
+                self.diccionario_lugares[nombre_nuevo] = [self.current_x, self.current_y]
+                self.guardar_memoria() # Persistencia en disco
+                
+                msg = f"Guardado punto {nombre_nuevo}"
+                self.get_logger().info(msg)
+                os.system(f'espeak -v es "{msg}" &')
+            else:
+                os.system('espeak -v es "Qué nombre le pongo?" &')
+
+        except Exception as e:
+            self.get_logger().error(f"Error registrando punto: {e}")
+
+    def responder_ubicacion(self):
+        if self.current_x is None:
+            os.system('espeak -v es "No estoy localizado" &')
+            return
+
+        lugar_mas_cercano = None
+        distancia_minima = float('inf')
+        margen_error = 1.5 
+
+        for nombre, coords in self.diccionario_lugares.items():
+            dist = math.hypot(self.current_x - coords[0], self.current_y - coords[1])
+            if dist < distancia_minima:
+                distancia_minima = dist
+                lugar_mas_cercano = nombre
+
+        if lugar_mas_cercano and distancia_minima <= margen_error:
+            os.system(f'espeak -v es "Estamos en {lugar_mas_cercano}" &')
+        else:
+            os.system(f'espeak -v es "Estamos en zona desconocida" &')
+
+    def iniciar_navegacion(self, lugar, coordenadas):
+        x, y = coordenadas
+        self.get_logger().info(f"🚀 Enviando a {lugar} ({x}, {y})")
         os.system(f'espeak -v es "Yendo a {lugar}" &')
 
-        # 2. Comprobar si Nav2 está activo (wait_for_server)
-        if not self.nav_to_pose_client.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error("¡Nav2 no responde! ¿Está lanzado el stack de navegación?")
-            os.system('espeak -v es "Error, navegación no disponible" &')
-            return
+        msg = PoseStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.position.x = float(x)
+        msg.pose.position.y = float(y)
+        msg.pose.orientation.w = 1.0
 
-        # 3. Construcción del Goal (Adaptado de tu ejemplo)
-        goal_msg = NavigateToPose.Goal()
-        
-        # Rellenamos el PoseStamped
-        goal_msg.pose.header.frame_id = 'map'
-        goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
-        
-        goal_msg.pose.pose.position.x = float(x)
-        goal_msg.pose.pose.position.y = float(y)
-        goal_msg.pose.pose.position.z = 0.0
-        
-        # Orientación (w=1.0 significa mirando hacia "adelante" o neutro)
-        goal_msg.pose.pose.orientation.x = 0.0
-        goal_msg.pose.pose.orientation.y = 0.0
-        goal_msg.pose.pose.orientation.z = 0.0
-        goal_msg.pose.pose.orientation.w = 1.0
-
-        # 4. Enviar el objetivo
-        self.get_logger().info(f"Enviando Goal a Nav2...")
-        
-        # Usamos send_goal_async para no bloquear el hilo de voz
-        self._send_goal_future = self.nav_to_pose_client.send_goal_async(
-            goal_msg,
-            feedback_callback=self.feedback_callback
-        )
-        
-        self._send_goal_future.add_done_callback(self.goal_response_callback)
-
-    def goal_response_callback(self, future):
-        """Callback cuando Nav2 acepta o rechaza la petición"""
-        goal_handle = future.result()
-        if not goal_handle.accepted:
-            self.get_logger().info('Goal rechazado por Nav2 :(')
-            return
-
-        self.get_logger().info('Goal aceptado, navegando...')
-        self._get_result_future = goal_handle.get_result_async()
-        self._get_result_future.add_done_callback(self.get_result_callback)
-
-    def get_result_callback(self, future):
-        """Callback cuando el robot llega al destino"""
-        result = future.result().result
-        self.get_logger().info('¡He llegado al destino!')
-        os.system('espeak -v es "He llegado" &')
-
-    def feedback_callback(self, feedback_msg):
-        """Callback periódico con la distancia restante (opcional)"""
-        feedback = feedback_msg.feedback
-        # Nota: Imprimir esto puede ensuciar mucho el log, descomenta si quieres ver la distancia
-        # print(f"Distancia restante: {feedback.distance_remaining:.2f} m")
+        self.goal_publisher.publish(msg)
 
     def activar_robot(self):
-        self.get_logger().info('¡ACTIVADO!')
         sonido = Sound()
         sonido.value = 6 
         self.publisher_sound.publish(sonido)
