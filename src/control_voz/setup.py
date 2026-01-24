@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'escuchar = control_voz.nodo_escucha:main',
+            'obstaculos = control_voz.nodo_obstaculos:main'
         ],
     },
 )

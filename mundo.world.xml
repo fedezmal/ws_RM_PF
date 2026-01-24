@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<mvsim_world>
+  <gui>
+    <show_grid>1</show_grid>
+  </gui>
+
+  <element class="ground_grid">
+    <interval>1.0</interval>
+    <color>#aaaaaa</color>
+  </element>
+
+  <include file="$(ros2 pkg prefix mvsim)/share/mvsim/definitions/small_robot.vehicle.xml"/>
+  <vehicle name="robot1" class="small_robot">
+    <init_pose>0 0 0</init_pose>
+  </vehicle>
+
+  <element class="occupancy_grid">
+      <file>mapa2.yaml</file> 
+      <show_visual>true</show_visual>
+  </element>
+
+  <block:class name="clase_mi_mapa">
+    <static>true</static>
+    <visual>
+        <model_uri>file:///home/ibu/ros2_ws/mapa1_elevado.obj</model_uri> 
+        
+        <model_scale>10 10 15</model_scale>
+        <model_pitch>0</model_pitch> 
+        <model_roll>0</model_roll> 
+    </visual>
+  </block:class>
+
+  <block class="clase_mi_mapa">
+    <init_pose>0 0 0</init_pose>
+  </block>
+
+</mvsim_world>

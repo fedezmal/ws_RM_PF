@@ -78,7 +78,7 @@ class NodoEscuchaKobuki(Node):
         # Default si no hay archivo
         return {
             "cocina":  [1.65, 0.0],
-            "puerta":  [3.17, 2.9],
+            "puerta":  [4.07, 3.39],
             "salón":   [5.0, -2.0]
         }
 
@@ -147,7 +147,7 @@ class NodoEscuchaKobuki(Node):
             self.activar_robot()
         
         # 5. DESPEDIDA
-        elif "adios" in texto:
+        elif "adios" in texto or "adiós" in texto:
             os.system('espeak -v es "Hasta luego" &') 
 
     def registrar_nuevo_punto(self, palabras):
