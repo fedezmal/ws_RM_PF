@@ -1,6 +1,0 @@
-image: mapa1.pgm
-resolution: 0.16
-origin: [-51.4, -63.98, 0.0]  # [X, Y, Yaw] <- AQUÍ ES DONDE MUEVES EL MAPA
-negate: 0
-occupied_thresh: 0.65
-free_thresh: 0.196
