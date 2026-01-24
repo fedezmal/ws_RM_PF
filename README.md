@@ -4,7 +4,7 @@
 
 - Este proyecto está pensado como un nodo de ROS2, por lo que la instalación se realiza copiando los contenidos del repositorio directamente en la raiz del workspace personal de ROS del usuario y ejecutando "colcon build" en dicho directorio.
 
-- Antes de poder ejecutar el nodo con "ros2 run control_voz escuchar" es necesario modificar el código base del nodo ubicado en "src/control_voz/control_voz/nodo_escucha.py". El ususario deberá indicar el puerto de su microfono en la linea 18: "self.mic_index = None" remplazando "None" por el índice de su microfono, así como modificar el número de canales en la linea 99 "stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000,". Para conocer los valores específicos de la máquina del usuario se pone a su disposición un script python check_mic.py.
+- Antes de poder ejecutar el nodo con "ros2 run control_voz escuchar" es necesario modificar el código base del nodo ubicado en "src/control_voz/control_voz/nodo_escucha.py". El ususario deberá indicar el puerto de su microfono en la linea 18: "self.mic_index = None" remplazando "None" por el índice de su microfono. Para conocer los valores específicos de la máquina del usuario se pone a su disposición un script python check_mic.py.
 
 **Instrucciones de uso**
 
